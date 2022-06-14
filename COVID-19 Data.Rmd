@@ -1,0 +1,460 @@
+---
+title: "Johns Hopkins COVID-19 Data"
+author: "Jason Horne"
+date: "6/13/2022"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+# Background
+
+As part of the response to the global COVID-19 pandemic, research institutions
+around the world have collected and published data online related to the spread
+of the virus. Johns Hopkins provides one such set of data, publishing US and
+global case and death counts to a GitHub repository that is free to access. 
+
+We will investigate these data to answer some questions, including:
+1. How well do the COVID-19 cases correlate to deaths?
+2. Have death rates remained the same through the spread of the Delta and
+Omicron variants?
+3. How has the state of North Carolina fared in the pandemic, compared to the
+rest of the country?
+
+
+# Load and Standardize
+First, we load the data by URL and perform some simple transformations to make
+them easier to work with.
+
+```{r import-data}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_global.csv",
+                "time_series_covid19_deaths_global.csv",
+                "time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_deaths_US.csv")
+urls <- str_c(url_in, file_names)
+
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+US_cases <- read_csv(urls[3])
+US_deaths <- read_csv(urls[4])
+```
+
+The data come as a single row per political unit (country, state/province,
+county, etc) with columns for each date.
+
+Let's use pivot_longer to transform
+the data such that we have a unique row per political unit per date. This will
+dramatically increase the number of rows in the data, but likewise dramatically
+decrease the number of columns in the data.
+
+```{r tidy1}
+global_cases <- global_cases %>% 
+  pivot_longer(
+    cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+    names_to = "date",
+    values_to = "cases"
+  ) %>% 
+  select(-c (Lat, Long))
+
+global_deaths <- global_deaths %>% 
+  pivot_longer(
+    cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+    names_to = "date",
+    values_to = "deaths"
+  ) %>% 
+  select(-c (Lat, Long))
+
+US_cases <- US_cases %>% 
+  pivot_longer(
+    cols = -(UID:Combined_Key),
+    names_to = "date",
+    values_to = "cases"
+  ) %>% 
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c (Lat, Long_))
+
+US_deaths <- US_deaths %>% 
+  pivot_longer(
+    cols = -c(UID:Combined_Key, Population),
+    names_to = "date",
+    values_to = "deaths"
+  ) %>% 
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c (Lat, Long_))
+```
+
+Note that global and US data are each separated into datasets
+for the number of cases and the number of deaths. Let's use the join functions
+to put those together. 
+
+After this step, there should be one row per political unit per date, with each
+row having both the case count and the death count.
+
+
+``` {r tidy2}
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = `Country/Region`,
+         Province_State = `Province/State`) %>%
+  mutate(date = mdy(date)) %>%
+  filter(cases > 0)
+
+US <- US_cases %>%
+  full_join(US_deaths)
+```
+
+Next, we'll add a Combined_Key field to the global data. Then we'll load a
+separate dataset with more country-specific information and join it to our
+global data by state/province and country.
+
+```{r tidy3}
+global <- global %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID,FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths,
+         Population, Combined_Key)
+```
+
+
+## Summary of Input Data
+Let's take a quick look at the data we have so far.
+
+```{r summary}
+summary(US)
+summary(global)
+```
+
+We note that there are rows in the US data that have a negative count of cases
+and deaths. Let's look more closely.
+
+```{r negativecases}
+US %>% filter(cases < 0)
+US %>% filter(deaths < 0)
+```
+
+It seems there are two rows from South Carolina with both negative case and
+death counts. Why could that be?
+
+For now, let's just remove those rows as possible errors, though we should
+later investigate to see if they're attempting to model a correction in previous
+numbers, or similar.
+
+```{r filternegative}
+US <- US %>% filter(cases >= 0)
+summary(US)
+```
+
+Now all of our data have nonnegative case and death counts.
+
+# Normalize Counts per Capita
+To compare US states with large populations against those with small
+populations, we need to look at a per capita case and death rate. We will do
+this by calculating the number of cases and deaths per million.
+
+First, we summarize all of the counties within a state. This US_by_state dataset
+will have one row per state per date.
+```{r visualize1}
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths,
+         deaths_per_mill, Population) %>%
+  ungroup()
+
+US_by_state
+```
+Our US_totals will summarize across the states. The resulting dataset will have
+one row per date, showing the number of total cases and deaths nationwide by
+that date.
+```{r visualize2}
+US_totals <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Country_Region, date, cases, deaths,
+         deaths_per_mill, Population) %>%
+  ungroup()
+
+US_totals
+```
+
+Let's quickly visualize the overall number of cases and deaths within the USA
+and the state of North Carolina. We'll use a logarithmic scale so early
+ups and downs aren't obscured by wilder variation later in the pandemic.
+
+```{r visualize3}
+US_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 in USA", y = NULL)
+
+state <- "North Carolina"
+US_by_state %>%
+  filter(Province_State == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID-19 in ", state), y = NULL)
+```
+
+These are interesting, but they really obscure the surges from the Delta and
+Omicron variants that occurred in late 2021 and early 2022. Let's take off the
+logarithmic scale and regenerate the graphs.
+
+```{r visualize4}
+US_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  #scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 in USA", y = NULL)
+
+state <- "North Carolina"
+US_by_state %>%
+  filter(Province_State == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  #scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID-19 in ", state), y = NULL)
+```
+
+These clearly show the COVID-19 case count in the USA and in North Carolina
+increasing through early 2021, at which point vaccinations became available.
+The total case counts started to flatten until the Delta variant became
+prominent starting in the fall of 2021, then flattened again briefly before an
+enormous spike from the Omicron variant in the beginning of 2022.
+
+We can visualize this even more clearly if we only look at the incremental
+number of new cases and deaths per date (rather than the totals of each). To do
+this, we'll add new_cases and new_deaths columns to the datasets, which we
+can then plot.
+
+```{r analyze}
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+
+US_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 in USA", y = NULL)
+
+US_by_state %>%
+  filter(Province_State == state) %>%
+  filter(new_cases > 0) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID-19 in ", state), y = NULL)
+```
+
+These plots clearly show the spikes for the Delta and Omicron variants, though
+the death counts are buried at the bottom of the graph since their numbers are
+so much lower than the case counts.  Let's look at just the death numbers to 
+see if we find the same spikes.
+
+```{r analyze2}
+US_totals %>%
+  ggplot(aes(x = date, y = new_deaths)) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 in USA", y = NULL)
+
+US_by_state %>%
+  filter(Province_State == state) %>%
+  filter(new_cases > 0) %>%
+  ggplot(aes(x = date, y = new_deaths)) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID-19 in ", state), y = NULL)
+```
+
+We can clearly see the spikes for the Delta and Omicron variants in these
+plots, but the Omicron death counts are roughly the same as those from Delta,
+and not much larger as the Omicron case count was compared to the Delta case
+count.
+
+This supports the common assertion that, although Omicron was much more
+widespread, it was a 'safer' form of the virus that did not result in as
+many per capita deaths as the earlier variants.
+
+# North Carolina vs National
+How did the state of North Carolina do in comparison to the whole country?
+
+We'll create a new tibble, joining NC data against the US data by date. We'll
+rename the columns so we can distinguish the NC values from the US values, and
+then plot them together.
+
+```{r nc_vs_us_1}
+NC_vs_US <- US_by_state %>% 
+  filter(Province_State == "North Carolina") %>% 
+  rename(nc_cases = cases, nc_deaths = deaths, 
+         nc_deaths_per_mill = deaths_per_mill, nc_new_cases = new_cases,
+         nc_new_deaths = new_deaths, nc_population = Population) %>%
+  select(date:nc_new_deaths) %>% 
+  full_join(US_totals) %>% 
+  select(-c(Country_Region)) %>% 
+  rename(us_cases = cases, us_deaths = deaths, 
+         us_deaths_per_mill = deaths_per_mill, us_population = Population, 
+         us_new_cases = new_cases, us_new_deaths = new_deaths)
+
+NC_vs_US %>%
+  ggplot(aes(x = date, y = nc_deaths_per_mill)) +
+  geom_line(aes(color = "nc_deaths_per_mill")) +
+  geom_point(aes(color = "nc_deaths_per_mill")) +
+  geom_line(aes(y = us_deaths_per_mill, color = "us_deaths_per_mill")) +
+  geom_point(aes(y = us_deaths_per_mill, color = "us_deaths_per_mill")) +
+  #scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 Deaths per Million in North Carolina vs USA", y = NULL)
+```
+
+This seems to indicate that North Carolina has had a lower 
+number of deaths per million residents than the overall nation throughout
+the pandemic.
+
+# Modeling NC vs US
+
+Let's generate a linear model between NC and US deaths per million residents to
+see how well the NC rate predicts the US rate.
+
+```{r nc_vs_us_2}
+mod_nc_us <- lm(us_deaths_per_mill ~ nc_deaths_per_mill, data = NC_vs_US)
+summary(mod_nc_us)
+```
+
+This shows a very high correlation between the two, with a p-value less than
+2.2e-16.
+
+Let's plot the model to see the relationship visually.
+
+```{r nc_vs_us_3}
+NC_vs_US_w_pred <- NC_vs_US %>% mutate(pred = predict(mod_nc_us))
+NC_vs_US_w_pred %>% 
+  ggplot() + 
+  geom_point(
+    aes(x = nc_deaths_per_mill, y = us_deaths_per_mill), color = "blue") + 
+  geom_point(aes(x = nc_deaths_per_mill, y = pred), color="red")
+```
+Indeed, we can see a very strong linear relationship between the number of
+deaths per million in North Carolina versus in the USA as a whole. The plot
+winds very tightly back and forth across the linear model.
+
+
+```{r analyze3, include=FALSE}
+# extra code used in class, but not for my own analysis
+
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases), 
+            population = max(Population),
+            cases_per_thou = cases * 1000 / population,
+            deaths_per_thou = deaths * 1000 / population) %>%
+  filter(cases > 0, population > 0)
+
+US_state_totals %>% slice_min(deaths_per_thou, n = 10)
+US_state_totals %>% slice_max(deaths_per_thou, n = 10)
+US_state_totals %>% slice_max(cases_per_thou, n = 10)
+```
+
+```{r model, include=FALSE}
+# extra code used in class, but not for my own analysis
+
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+# unneeded
+#x_grid <- seq(1,400)
+#new_df <- tibble(cases_per_thou = x_grid)
+US_tot_w_pred <- US_state_totals %>% mutate(pred = predict(mod))
+
+US_tot_w_pred %>% ggplot() + geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+
+```
+
+# Potential Bias
+There are many possible sources of bias in this analysis, including:
+
+1. COVID-19 numbers are reported via agencies within each state, who may have
+different procedures for collecting the data within that state. This could
+obscure the actual relationship between COVID-19 cases and deaths across states.
+2. We excluded data points with zero or negative numbers of cases and death
+rates. Why were those there? Were they an attempt to correct errors in data
+previously reported?  This should be investigated.
+3. As home testing has become more available, fewer people are testing through
+health care facilities or laboratories. Positive results from home tests are
+not necessarily reported to relevant state agencies. Therefore, the actual
+case numbers are likely higher than are reflected in the data for the time
+periods when home tests are widely used.
+
+
+# Session Information
+```{r sessioninfo}
+sessionInfo()
+```
