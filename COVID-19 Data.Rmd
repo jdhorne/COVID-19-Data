@@ -19,9 +19,12 @@ library(lubridate)
 As part of the response to the global COVID-19 pandemic, research institutions
 around the world have collected and published data online related to the spread
 of the virus. Johns Hopkins provides one such set of data, publishing US and
-global case and death counts to a GitHub repository that is free to access. 
+global case and death counts to a GitHub repository[^1] that is free to access. 
+
+[^1]: https://github.com/CSSEGISandData/COVID-19
 
 We will investigate these data to answer some questions, including:
+
 1. How well do the COVID-19 cases correlate to deaths?
 2. Have death rates remained the same through the spread of the Delta and
 Omicron variants?
@@ -344,6 +347,10 @@ This supports the common assertion that, although Omicron was much more
 widespread, it was a 'safer' form of the virus that did not result in as
 many per capita deaths as the earlier variants.
 
+There are a couple of data points for North Carolina in mid-2022 that seem to
+be outliers. Could these just be due to a lag in reporting earlier deaths?
+This is an issue for further investigation.
+
 # North Carolina vs National
 How did the state of North Carolina do in comparison to the whole country?
 
@@ -437,6 +444,16 @@ US_tot_w_pred %>% ggplot() + geom_point(aes(x = cases_per_thou, y = deaths_per_t
   geom_point(aes(x = cases_per_thou, y = pred), color = "red")
 
 ```
+# Conclusion
+COVID-19 cases have spiked at times, likely due to appearances of highly-contagious
+Delta and Omicron variants. The state of North Carolina has experiences highs
+and lows in parallel with overall USA data, with perhaps a slightly better-than-average
+death count per million residents. Omicron, per our analysis, does indeed to 
+be a safer variant of the virus as its death counts have not risen in parallel
+with case counts, as was the case for the original virus and the Delta variant.
+
+Before drawing firm conclusions, we would have to investigate potential sources
+of bias in the underlying data.
 
 # Potential Bias
 There are many possible sources of bias in this analysis, including:
@@ -452,6 +469,8 @@ health care facilities or laboratories. Positive results from home tests are
 not necessarily reported to relevant state agencies. Therefore, the actual
 case numbers are likely higher than are reflected in the data for the time
 periods when home tests are widely used.
+4. Were the "outlier" data points in the NC death counts from spring of 2022
+erroneous? These numbers should be confirmed.
 
 
 # Session Information
